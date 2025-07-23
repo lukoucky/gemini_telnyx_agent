@@ -86,7 +86,13 @@ if __name__ == "__main__":
     import uvicorn
     
     logger.info("=" * 50)
-    logger.info("🎙️  TELNYX VOICE AGENT")
+    logger.info("🎙️  TELNYX VOICE AGENT - FIXED INCOMING AUDIO")
+    logger.info("=" * 50)
+    logger.info("🔧 Critical fixes applied:")
+    logger.info("   • Direct ulaw2lin with width=2 for incoming audio")
+    logger.info("   • Skip problematic lin2lin double-conversion")
+    logger.info("   • Filter out tiny RTP payload artifacts")
+    logger.info("   • Improved WebSocket timing for better capture")
     logger.info("=" * 50)
     logger.info("📋 Configuration:")
     logger.info(f"   • Stream URL: {STREAM_URL}")

@@ -49,7 +49,7 @@ class WebSocketHandler:
                     try:
                         # Handle incoming WebSocket messages
                         try:
-                            data = await asyncio.wait_for(websocket.receive(), timeout=0.05)
+                            data = await asyncio.wait_for(websocket.receive(), timeout=0.02)  # 🚨 REDUCED timeout for better capture
                             
                             if "text" in data:
                                 text_data = data["text"]
@@ -130,7 +130,7 @@ class WebSocketHandler:
                                 logger.info(f"🎵 Sent {audio_chunk_count} continuous audio chunks")
                         
                         # Small delay to prevent busy waiting
-                        await asyncio.sleep(0.02)
+                        await asyncio.sleep(0.01)  # 🚨 REDUCED sleep for better responsiveness
                         
                     except Exception as e:
                         logger.error(f"❌ WebSocket loop error: {e}")

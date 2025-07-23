@@ -28,19 +28,23 @@ class AudioRecorder:
         self.outgoing_chunks = []
         
     def add_incoming_chunk(self, payload: str):
-        """Add incoming RTP payload for conversation recording"""
+        """Add incoming RTP payload for conversation recording - FIXED"""
         try:
             # Decode base64 to get raw μ-law data
             ulaw_data = base64.b64decode(payload)
             
+            # 🚨 CRITICAL FIX: Skip tiny payloads (likely RTP artifacts)
+            if len(ulaw_data) < 10:
+                logger.debug(f"🔍 Skipping tiny payload: {len(ulaw_data)} bytes")
+                return
+            
             if HAS_AUDIOOP:
-                # Use proper audioop conversion
-                linear_data = audioop.ulaw2lin(ulaw_data, 1)  # width=1 for μ-law input
-                # Convert to 16-bit for WAV storage
-                linear_16bit = audioop.lin2lin(linear_data, 1, 2)  # 8-bit to 16-bit
+                # 🚨 FIX: Use DIRECT ulaw2lin to 16-bit (width=2)
+                # This bypasses the problematic 8-bit intermediate step
+                linear_16bit = audioop.ulaw2lin(ulaw_data, 2)
                 self.incoming_chunks.append(linear_16bit)
             else:
-                # Use fallback conversion
+                # Use fallback conversion to 16-bit
                 linear_samples = []
                 for ulaw_byte in ulaw_data:
                     linear_sample = self._fallback_ulaw_to_linear(ulaw_byte)
@@ -51,19 +55,18 @@ class AudioRecorder:
             logger.error(f"Error processing incoming audio: {e}")
         
     def add_outgoing_chunk(self, payload: str):
-        """Add outgoing RTP payload for conversation recording"""
+        """Add outgoing RTP payload for conversation recording - KEEP WORKING VERSION"""
         try:
             # Decode base64 to get raw μ-law data
             ulaw_data = base64.b64decode(payload)
             
             if HAS_AUDIOOP:
-                # Use proper audioop conversion
+                # Keep the WORKING outgoing processing (don't change what works!)
                 linear_data = audioop.ulaw2lin(ulaw_data, 1)  # width=1 for μ-law input
-                # Convert to 16-bit for WAV storage
                 linear_16bit = audioop.lin2lin(linear_data, 1, 2)  # 8-bit to 16-bit
                 self.outgoing_chunks.append(linear_16bit)
             else:
-                # Use fallback conversion
+                # Use fallback conversion to 16-bit
                 linear_samples = []
                 for ulaw_byte in ulaw_data:
                     linear_sample = self._fallback_ulaw_to_linear(ulaw_byte)
