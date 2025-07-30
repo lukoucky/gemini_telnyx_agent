@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 import dotenv
 
 from handlers.webhook_handler import WebhookHandler
-from handlers.websocket_handler import WebSocketHandler
+from handlers.agent_handler import get_websocket_handler
 
 # Load environment variables first
 dotenv.load_dotenv()
@@ -26,13 +26,16 @@ logging.getLogger("uvicorn").setLevel(logging.WARNING)
 app = FastAPI(title="Telnyx Voice Agent", version="1.0.0")
 
 # Configuration
-NGROK_URL = "c8d00a2a4259.ngrok-free.app"  # Update this with your ngrok URL
+NGROK_URL = "b786f85bb352.ngrok-free.app"  # Update this with your ngrok URL
 STREAM_URL = f"wss://{NGROK_URL}/audio"
 TEST_AUDIO_FILE = "test_audio.mp3"  # Optional: Add an MP3 file to play
 
 # Initialize handlers (after environment is loaded)
 webhook_handler = WebhookHandler(STREAM_URL)
-websocket_handler = WebSocketHandler(TEST_AUDIO_FILE)
+
+# Get agent type from environment (simple, gemini, legacy)
+AGENT_TYPE = os.getenv("VOICE_AGENT_TYPE", "simple")
+websocket_handler = get_websocket_handler(AGENT_TYPE)
 
 # Ensure audio logs directory exists
 os.makedirs("audio_logs", exist_ok=True)
@@ -86,9 +89,15 @@ if __name__ == "__main__":
     import uvicorn
     
     logger.info("=" * 50)
-    logger.info("🎙️  TELNYX VOICE AGENT - FIXED INCOMING AUDIO")
+    logger.info("🎙️  TELNYX VOICE AGENT - WITH AI AGENTS")
     logger.info("=" * 50)
-    logger.info("🔧 Critical fixes applied:")
+    logger.info("🤖 Agent Integration:")
+    logger.info(f"   • Agent Type: {AGENT_TYPE.upper()}")
+    logger.info("   • Extensible agent architecture")
+    logger.info("   • Real-time audio conversion (PCMU ↔ PCM)")
+    logger.info("   • Bidirectional conversation support")
+    logger.info("=" * 50)
+    logger.info("🔧 Audio fixes applied:")
     logger.info("   • Direct ulaw2lin with width=2 for incoming audio")
     logger.info("   • Skip problematic lin2lin double-conversion")
     logger.info("   • Filter out tiny RTP payload artifacts")
