@@ -26,7 +26,7 @@ logging.getLogger("uvicorn").setLevel(logging.WARNING)
 app = FastAPI(title="Telnyx Voice Agent", version="1.0.0")
 
 # Configuration
-NGROK_URL = "b786f85bb352.ngrok-free.app"  # Update this with your ngrok URL
+NGROK_URL = os.getenv("NGROK_URL")
 STREAM_URL = f"wss://{NGROK_URL}/audio"
 TEST_AUDIO_FILE = "test_audio.mp3"  # Optional: Add an MP3 file to play
 

@@ -44,8 +44,8 @@ app = FastAPI(title="Telnyx-Gemini Voice Bridge")
 
 # Configuration
 TELNYX_API_KEY = os.getenv("TELNYX_API_KEY")
-GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")  # Add your Google API key to .env
-NGROK_URL = "26746fed832f.ngrok-free.app"
+GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
+NGROK_URL = os.getenv("NGROK_URL")
 STREAM_URL = f"wss://{NGROK_URL}/audio"
 
 # Initialize Telnyx
