@@ -108,37 +108,84 @@ class GeminiVoiceAgent:
         """Listen for responses from Gemini"""
         logger.info(f"[{self.call_id}] Starting Gemini response listener")
         response_count = 0
+        last_response_time = asyncio.get_event_loop().time()
         
         try:
-            # Use session.receive() - this is the correct way
-            async for response in self.session.receive():
-                if not self.is_connected:
-                    logger.info(f"[{self.call_id}] Listener stopping - session disconnected")
+            # Use session.receive() with proper error handling
+            while self.is_connected:
+                try:
+                    async for response in self.session.receive():
+                        if not self.is_connected:
+                            logger.info(f"[{self.call_id}] Listener stopping - session disconnected")
+                            break
+                        
+                        response_count += 1
+                        last_response_time = asyncio.get_event_loop().time()
+                        logger.info(f"[{self.call_id}] Gemini response #{response_count}: {type(response).__name__}")
+                        
+                        if response.server_content and response.server_content.model_turn:
+                            logger.info(f"[{self.call_id}] Gemini model turn detected")
+                            audio_parts = 0
+                            text_parts = 0
+                            
+                            for part in response.server_content.model_turn.parts:
+                                if part.inline_data and part.inline_data.mime_type.startswith('audio/'):
+                                    audio_parts += 1
+                                    self.response_queue.append(part.inline_data.data)
+                                    logger.info(f"[{self.call_id}] Audio response #{audio_parts}: {len(part.inline_data.data)} bytes (queue size: {len(self.response_queue)})")
+                                elif hasattr(part, 'text') and part.text:
+                                    text_parts += 1
+                                    logger.info(f"[{self.call_id}] Text response #{text_parts}: {part.text}")
+                            
+                            logger.info(f"[{self.call_id}] Model turn complete: {audio_parts} audio parts, {text_parts} text parts")
+                        
+                        # Check for other response types
+                        if hasattr(response, 'text') and response.text:
+                            logger.info(f"[{self.call_id}] Direct text response: {response.text}")
+                    
+                    # If we get here, the async for loop completed normally
+                    logger.warning(f"[{self.call_id}] Gemini receive loop completed unexpectedly after {response_count} responses")
+                    
+                    # If session is still connected but loop ended, this is abnormal
+                    if self.is_connected:
+                        logger.error(f"[{self.call_id}] CRITICAL: Gemini receive loop ended while session still connected!")
+                        logger.error(f"[{self.call_id}] This suggests Gemini session closed prematurely")
+                        
+                        # Try to detect if session is actually still alive
+                        try:
+                            # Send a small audio chunk to test if session is responsive
+                            test_audio = b'\x00' * 320  # 20ms of silence at 16kHz
+                            await self.session.send_realtime_input(
+                                media=types.Blob(data=test_audio, mime_type='audio/pcm;rate=16000')
+                            )
+                            logger.info(f"[{self.call_id}] Session test send successful - session may still be alive")
+                            
+                            # Wait a bit and try to receive again
+                            await asyncio.sleep(0.1)
+                            continue
+                            
+                        except Exception as test_e:
+                            logger.error(f"[{self.call_id}] Session test failed: {test_e}")
+                            logger.error(f"[{self.call_id}] Session is definitively dead, breaking listener loop")
+                            break
+                    else:
+                        logger.info(f"[{self.call_id}] Receive loop ended normally - session disconnected")
+                        break
+                        
+                except StopAsyncIteration:
+                    logger.warning(f"[{self.call_id}] Gemini session receive iterator exhausted")
+                    if self.is_connected:
+                        logger.error(f"[{self.call_id}] Session iterator exhausted while still connected - this is unexpected")
                     break
-                
-                response_count += 1
-                logger.info(f"[{self.call_id}] Gemini response #{response_count}: {type(response).__name__}")
-                
-                if response.server_content and response.server_content.model_turn:
-                    logger.info(f"[{self.call_id}] Gemini model turn detected")
-                    audio_parts = 0
-                    text_parts = 0
-                    
-                    for part in response.server_content.model_turn.parts:
-                        if part.inline_data and part.inline_data.mime_type.startswith('audio/'):
-                            audio_parts += 1
-                            self.response_queue.append(part.inline_data.data)
-                            logger.info(f"[{self.call_id}] Audio response #{audio_parts}: {len(part.inline_data.data)} bytes (queue size: {len(self.response_queue)})")
-                        elif hasattr(part, 'text') and part.text:
-                            text_parts += 1
-                            logger.info(f"[{self.call_id}] Text response #{text_parts}: {part.text}")
-                    
-                    logger.info(f"[{self.call_id}] Model turn complete: {audio_parts} audio parts, {text_parts} text parts")
-                
-                # Check for other response types
-                if hasattr(response, 'text') and response.text:
-                    logger.info(f"[{self.call_id}] Direct text response: {response.text}")
-                    
+                except Exception as receive_e:
+                    logger.error(f"[{self.call_id}] Error in receive loop: {type(receive_e).__name__}: {receive_e}")
+                    if self.is_connected:
+                        logger.info(f"[{self.call_id}] Attempting to continue after receive error...")
+                        await asyncio.sleep(0.1)
+                        continue
+                    else:
+                        break
+                        
         except asyncio.CancelledError:
             logger.info(f"[{self.call_id}] Listener cancelled")
         except Exception as e:
@@ -205,27 +252,50 @@ class GeminiVoiceAgent:
     async def _monitor_listener(self):
         """Monitor the listener task and restart if it crashes"""
         logger.info(f"[{self.call_id}] Starting listener monitor")
+        restart_count = 0
+        max_restarts = 3
         
         while self.is_connected:
             await asyncio.sleep(1)  # Check every second
             
             if self.listener_task and self.listener_task.done():
+                # Listener task has ended - determine if it crashed or ended normally
+                listener_exception = None
                 try:
-                    # Check if it ended with an exception
+                    # Get the result to see if it ended with an exception
                     await self.listener_task
+                    logger.info(f"[{self.call_id}] Listener task ended normally")
                 except Exception as e:
-                    logger.error(f"[{self.call_id}] Listener task crashed: {e}")
-                    logger.info(f"[{self.call_id}] Attempting to restart listener...")
+                    listener_exception = e
+                    logger.error(f"[{self.call_id}] Listener task crashed: {type(e).__name__}: {e}")
+                
+                # Always try to restart if we're still connected, whether it crashed or ended normally
+                if self.is_connected and restart_count < max_restarts:
+                    restart_count += 1
+                    logger.info(f"[{self.call_id}] Attempting to restart listener (attempt {restart_count}/{max_restarts})...")
                     
                     # Restart the listener
-                    if self.session and self.is_connected:
-                        self.listener_task = asyncio.create_task(self._listen_for_responses())
-                        logger.info(f"[{self.call_id}] Listener restarted successfully")
+                    if self.session:
+                        try:
+                            self.listener_task = asyncio.create_task(self._listen_for_responses())
+                            logger.info(f"[{self.call_id}] Listener restarted successfully")
+                            # Reset restart count on successful restart
+                            await asyncio.sleep(2)  # Give it a moment to start
+                            if not self.listener_task.done():
+                                restart_count = 0  # Reset counter if restart seems successful
+                        except Exception as restart_e:
+                            logger.error(f"[{self.call_id}] Failed to restart listener: {restart_e}")
                     else:
                         logger.error(f"[{self.call_id}] Cannot restart listener - session not available")
                         break
+                elif restart_count >= max_restarts:
+                    logger.error(f"[{self.call_id}] Max restart attempts ({max_restarts}) reached, giving up")
+                    break
+                else:
+                    logger.info(f"[{self.call_id}] Not restarting listener - session disconnected")
+                    break
         
-        logger.info(f"[{self.call_id}] Listener monitor stopped")
+        logger.info(f"[{self.call_id}] Listener monitor stopped (restarts attempted: {restart_count})")
 
 
 class AudioConverter:
