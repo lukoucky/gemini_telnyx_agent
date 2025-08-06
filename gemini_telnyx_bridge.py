@@ -45,7 +45,7 @@ app = FastAPI(title="Telnyx-Gemini Voice Bridge")
 # Configuration
 TELNYX_API_KEY = os.getenv("TELNYX_API_KEY")
 GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
-NGROK_URL = os.getenv("NGROK_URL")
+NGROK_URL = os.getenv("NGROK_URL", "26746fed832f.ngrok-free.app").replace("https://", "").replace("http://", "")
 STREAM_URL = f"wss://{NGROK_URL}/audio"
 
 # Initialize Telnyx
@@ -80,57 +80,78 @@ class GeminiVoiceAgent:
         self.is_connected = False
         self.response_queue = deque()
         self.converter = AudioConverter()
+        self.listener_task = None
         
     async def start_session(self):
         """Initialize Gemini live session using proper context manager"""
         try:
-            logger.info("Starting Gemini session...")
+            logger.info(f"Starting Gemini session for call {self.call_id}...")
             self.session_context = self.client.aio.live.connect(
                 model=GEMINI_MODEL, 
                 config=GEMINI_CONFIG
             )
             self.session = await self.session_context.__aenter__()
             self.is_connected = True
-            logger.info("Gemini session started successfully")
+            logger.info(f"Gemini session started successfully for call {self.call_id}")
             
-            # Start response listener
-            asyncio.create_task(self._listen_for_responses())
+            # Start response listener with proper error handling
+            self.listener_task = asyncio.create_task(self._listen_for_responses())
+            
+            # Monitor the listener task
+            asyncio.create_task(self._monitor_listener())
             
         except Exception as e:
-            logger.error(f"Failed to start Gemini session: {e}")
+            logger.error(f"Failed to start Gemini session for call {self.call_id}: {e}")
             raise
     
     async def _listen_for_responses(self):
         """Listen for responses from Gemini"""
+        logger.info(f"[{self.call_id}] Starting Gemini response listener")
+        response_count = 0
+        
         try:
             # Use session.receive() - this is the correct way
             async for response in self.session.receive():
                 if not self.is_connected:
+                    logger.info(f"[{self.call_id}] Listener stopping - session disconnected")
                     break
                 
-                logger.info(f"Received Gemini response: {type(response).__name__}")
+                response_count += 1
+                logger.info(f"[{self.call_id}] Gemini response #{response_count}: {type(response).__name__}")
                 
                 if response.server_content and response.server_content.model_turn:
-                    logger.info("Gemini model turn detected")
+                    logger.info(f"[{self.call_id}] Gemini model turn detected")
+                    audio_parts = 0
+                    text_parts = 0
+                    
                     for part in response.server_content.model_turn.parts:
                         if part.inline_data and part.inline_data.mime_type.startswith('audio/'):
+                            audio_parts += 1
                             self.response_queue.append(part.inline_data.data)
-                            logger.info(f"Received audio response from Gemini: {len(part.inline_data.data)} bytes")
+                            logger.info(f"[{self.call_id}] Audio response #{audio_parts}: {len(part.inline_data.data)} bytes (queue size: {len(self.response_queue)})")
                         elif hasattr(part, 'text') and part.text:
-                            logger.info(f"Received text response from Gemini: {part.text}")
+                            text_parts += 1
+                            logger.info(f"[{self.call_id}] Text response #{text_parts}: {part.text}")
+                    
+                    logger.info(f"[{self.call_id}] Model turn complete: {audio_parts} audio parts, {text_parts} text parts")
                 
                 # Check for other response types
                 if hasattr(response, 'text') and response.text:
-                    logger.info(f"Gemini text: {response.text}")
+                    logger.info(f"[{self.call_id}] Direct text response: {response.text}")
                     
+        except asyncio.CancelledError:
+            logger.info(f"[{self.call_id}] Listener cancelled")
         except Exception as e:
-            if self.is_connected:  # Only log if unexpected
-                logger.error(f"Error listening for Gemini responses: {e}")
+            logger.error(f"[{self.call_id}] CRITICAL: Listener crashed with error: {type(e).__name__}: {e}")
+            if self.is_connected:
+                logger.error(f"[{self.call_id}] Listener crashed while session still connected!")
+        finally:
+            logger.info(f"[{self.call_id}] Listener ended after {response_count} responses")
     
     async def send_audio(self, audio_bytes: bytes, sample_rate: int = 16000):
         """Send audio to Gemini"""
         if not self.session or not self.is_connected:
-            logger.warning("Session not available for audio sending")
+            logger.warning(f"[{self.call_id}] Session not available for audio sending")
             return
         
         try:
@@ -140,28 +161,71 @@ class GeminiVoiceAgent:
                     mime_type=f'audio/pcm;rate={sample_rate}'
                 )
             )
-            logger.debug(f"Sent {len(audio_bytes)} bytes of audio to Gemini")
+            # Log periodically to avoid spam
+            if not hasattr(self, '_audio_send_count'):
+                self._audio_send_count = 0
+            self._audio_send_count += 1
+            if self._audio_send_count % 100 == 1:
+                logger.info(f"[{self.call_id}] Sent {self._audio_send_count} audio chunks to Gemini")
         except Exception as e:
-            logger.error(f"Error sending audio to Gemini: {e}")
+            logger.error(f"[{self.call_id}] Error sending audio to Gemini: {e}")
     
     def get_response_audio(self) -> Optional[bytes]:
         """Get audio response from Gemini if available"""
         if self.response_queue:
-            return self.response_queue.popleft()
+            audio = self.response_queue.popleft()
+            logger.debug(f"[{self.call_id}] Retrieved audio from queue: {len(audio)} bytes (queue remaining: {len(self.response_queue)})")
+            return audio
         return None
     
     async def cleanup(self):
         """Cleanup session"""
+        logger.info(f"[{self.call_id}] Starting Gemini cleanup")
+        
+        # Cancel listener task if running
+        if hasattr(self, 'listener_task') and self.listener_task and not self.listener_task.done():
+            logger.info(f"[{self.call_id}] Cancelling listener task")
+            self.listener_task.cancel()
+            try:
+                await self.listener_task
+            except asyncio.CancelledError:
+                pass
+        
         if self.session_context and self.session:
             try:
                 self.is_connected = False
                 await self.session_context.__aexit__(None, None, None)
-                logger.info("Gemini session cleaned up")
+                logger.info(f"[{self.call_id}] Gemini session cleaned up")
             except Exception as e:
-                logger.error(f"Error cleaning up Gemini session: {e}")
+                logger.error(f"[{self.call_id}] Error cleaning up Gemini session: {e}")
             finally:
                 self.session = None
                 self.session_context = None
+                
+    async def _monitor_listener(self):
+        """Monitor the listener task and restart if it crashes"""
+        logger.info(f"[{self.call_id}] Starting listener monitor")
+        
+        while self.is_connected:
+            await asyncio.sleep(1)  # Check every second
+            
+            if self.listener_task and self.listener_task.done():
+                try:
+                    # Check if it ended with an exception
+                    await self.listener_task
+                except Exception as e:
+                    logger.error(f"[{self.call_id}] Listener task crashed: {e}")
+                    logger.info(f"[{self.call_id}] Attempting to restart listener...")
+                    
+                    # Restart the listener
+                    if self.session and self.is_connected:
+                        self.listener_task = asyncio.create_task(self._listen_for_responses())
+                        logger.info(f"[{self.call_id}] Listener restarted successfully")
+                    else:
+                        logger.error(f"[{self.call_id}] Cannot restart listener - session not available")
+                        break
+        
+        logger.info(f"[{self.call_id}] Listener monitor stopped")
 
 
 class AudioConverter:
@@ -435,10 +499,9 @@ async def handle_telnyx_webhook(request: Request):
             telnyx.Call.create_answer(
                 call_control_id,
                 stream_url=STREAM_URL,
-                stream_track="both_tracks",
+                stream_track="inbound_track",  # Only receive caller audio
                 stream_bidirectional_mode="rtp",
-                stream_bidirectional_codec="PCMU",
-                stream_bidirectional_target_legs="self"
+                stream_bidirectional_codec="PCMU"
             )
             
         elif event_type == "call.answered":
@@ -466,26 +529,41 @@ async def handle_audio_websocket(websocket: WebSocket):
     
     logger.info("WebSocket connection established")
     
+    frame_count = 0
+    
     try:
         async for message in websocket.iter_text():
             data = json.loads(message)
             event = data.get("event")
             
+            logger.info(f"WebSocket event: {event}")
+            
             if event == "connected":
-                logger.info("WebSocket connected")
+                logger.info("WebSocket connected successfully")
                 
             elif event == "start":
-                call_id = data.get("start", {}).get("call_control_id")
+                # Extract call info and media format
+                start_data = data.get("start", {})
+                call_id = start_data.get("call_control_id")
+                media_format = start_data.get("media_format", {})
+                
                 logger.info(f"Started streaming for call: {call_id}")
+                logger.info(f"Media format: {json.dumps(media_format, indent=2)}")
                 
             elif event == "media" and call_id:
-                # Get audio payload from Telnyx
-                payload = data.get("media", {}).get("payload", "")
+                # Process incoming audio
+                media_data = data.get("media", {})
+                payload = media_data.get("payload", "")
                 
                 if payload:
                     try:
-                        # Decode base64 audio
+                        # Decode base64 audio data
                         telnyx_audio = base64.b64decode(payload)
+                        frame_count += 1
+                        
+                        # Log every 50 frames (~1 second)
+                        if frame_count % 50 == 0:
+                            logger.info(f"Received {frame_count} audio frames, latest size: {len(telnyx_audio)} bytes")
                         
                         # Process through Gemini
                         response_audio = await bridge.process_telnyx_audio(call_id, telnyx_audio)
@@ -503,6 +581,8 @@ async def handle_audio_websocket(websocket: WebSocket):
                             
                     except Exception as e:
                         logger.error(f"Error processing media for call {call_id}: {e}")
+                else:
+                    logger.warning("Received media event with empty payload")
                 
                 # Also check for any pending audio responses from Gemini
                 try:
