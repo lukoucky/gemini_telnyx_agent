@@ -357,7 +357,7 @@ class AudioConverter:
 
 
 class AudioRecorder:
-    """Record inbound and outbound audio to WAV files"""
+    """Record inbound and outbound audio to WAV files with proper timing"""
     
     def __init__(self, call_id: str):
         self.call_id = call_id
@@ -369,6 +369,11 @@ class AudioRecorder:
         self.inbound_wav = None
         self.outbound_wav = None
         
+        # Track timing for proper silence insertion
+        self.call_start_time = None
+        self.last_agent_audio_time = None
+        self.total_agent_samples_written = 0  # Track total samples written to agent recording
+        
         logger.info(f"Audio recording initialized for call {call_id}")
         logger.info(f"Inbound: {self.inbound_file}")
         logger.info(f"Outbound: {self.outbound_file}")
@@ -376,6 +381,11 @@ class AudioRecorder:
     def record_caller_audio(self, pcm_data: bytes, sample_rate: int = 8000):
         """Record caller audio (you speaking to agent) - THIS IS INBOUND"""
         try:
+            # Set call start time on first audio
+            if self.call_start_time is None:
+                self.call_start_time = datetime.now()
+                logger.info(f"[{self.call_id}] Call audio recording started at {self.call_start_time}")
+            
             if not self.inbound_wav:
                 # Initialize inbound WAV file  
                 self.inbound_wav = wave.open(self.inbound_file, 'wb')
@@ -390,17 +400,53 @@ class AudioRecorder:
             logger.error(f"Error recording caller audio: {e}")
     
     def record_agent_audio(self, pcm_data: bytes, sample_rate: int = 24000):
-        """Record agent audio (agent speaking to caller) - THIS IS OUTBOUND"""
+        """Record agent audio (agent speaking to caller) - THIS IS OUTBOUND with proper timing"""
         try:
+            current_time = datetime.now()
+            
+            # Set call start time if not already set
+            if self.call_start_time is None:
+                self.call_start_time = current_time
+                logger.info(f"[{self.call_id}] Call audio recording started at {self.call_start_time}")
+            
             if not self.outbound_wav:
                 # Initialize outbound WAV file
                 self.outbound_wav = wave.open(self.outbound_file, 'wb')
                 self.outbound_wav.setnchannels(1)  # Mono
                 self.outbound_wav.setsampwidth(2)  # 16-bit
                 self.outbound_wav.setframerate(sample_rate)
+                self.last_agent_audio_time = current_time
+                logger.info(f"[{self.call_id}] Started agent audio recording at sample rate {sample_rate}Hz")
+            
+            # Calculate how much time has passed since call started
+            time_since_call_start = (current_time - self.call_start_time).total_seconds()
+            
+            # Calculate how many samples SHOULD have been written by now
+            expected_total_samples = int(time_since_call_start * sample_rate)
+            
+            # Calculate silence gap to insert
+            silence_samples_needed = expected_total_samples - self.total_agent_samples_written
+            
+            # Insert silence if there's a significant gap (more than 50ms worth of samples)
+            min_gap_samples = int(0.05 * sample_rate)  # 50ms
+            if silence_samples_needed > min_gap_samples:
+                # Limit silence to reasonable amount (max 10 seconds of silence)
+                max_silence_samples = int(10.0 * sample_rate)
+                silence_samples_needed = min(silence_samples_needed, max_silence_samples)
                 
-            # Write PCM data directly
+                # Create silence (16-bit PCM zeros)
+                silence_bytes = b'\x00\x00' * silence_samples_needed
+                self.outbound_wav.writeframes(silence_bytes)
+                self.total_agent_samples_written += silence_samples_needed
+                
+                silence_duration = silence_samples_needed / sample_rate
+                logger.info(f"[{self.call_id}] Inserted {silence_duration:.2f}s of silence in agent recording")
+            
+            # Write the actual audio data
+            audio_samples = len(pcm_data) // 2  # 16-bit samples = bytes / 2
             self.outbound_wav.writeframes(pcm_data)
+            self.total_agent_samples_written += audio_samples
+            self.last_agent_audio_time = current_time
             
         except Exception as e:
             logger.error(f"Error recording agent audio: {e}")
